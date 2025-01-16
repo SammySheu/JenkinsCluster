@@ -1,0 +1,38 @@
+version: '3.3'
+services:
+  jenkins:
+    # image: jenkins/jenkins:lts
+    image: custom_jenkins
+    restart: unless-stopped
+    privileged: true
+    user: root
+    ports:
+    - 8080:8080
+    container_name: Jenkins
+    volumes:
+    - $PWD/.ssh:/var/jenkins_home/.ssh
+    - $PWD/setting:/var/jenkins_home
+    - $PWD/shared:/var/jenkins_home/workspace/shared_tags
+    - /var/run/docker.sock:/var/run/docker.sock
+  
+  jenkins-agent:
+    build:
+      context: ./JenkinsAgent
+      dockerfile: Dockerfile
+    image: custom_jenkins_agent
+    privileged: true
+    user: root
+    container_name: Jenkins-agent
+    expose:
+      - 22
+    environment:
+      - JENKINS_AGENT_SSH_PUBKEY=ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCzZHWQj6AwvARs6TZrVBPfirNAC1JUJ2Dq2fi3uXw7JZQ6uzJ27WLtDCwBMxTpg78tjUe1wE5Vx1f8RrGr/Tl1llFXiGePMpqZ8457nJTjoyBVMgrxczhZdlim4dWX/O639E/1XXmEy6HDUiFxN9ONntYllStmsEpI/YcST2yh2MJ9esxIXXYbrZRHJVSCTQTkeSiNB0o48i+k9MC1SXVriZw1JtO2Wg6HFtwKSmBVBPLLSJ5ew7nrfm/HDCCmwR8fLFFc69r1gTESRX/lXG8uTfKVBHGgO5g5Vr/iO3hd23E7tFfYThnZIgiLAEMAlIiZqgiGB0irR/0ULa09d1TpZ7T/m3RONy4P01ICDNF0cvddZhqXHSs4OtZMJcoeF6JKRdjbxzo2B6MedL+CwCjc5d4NLZ+4LrZax+ZVcwgAt+UzpncBnTzU22X+LbCbbmNk+P3BgtfWR+oEoAd7zWSQqNAcgSV6n1hBq2i+NsD5WRqqiusMRNvPn4zmjDRk2NUnnzge39O10Pefh5b+RwUK7aSzo9XSzEey1bMUX7IACSaNZWrzB0sZiLmFmj/XZKIPtA+ASqDILCJ0kCX8PUVoA8k0i00G3dPoKivPj3YIAW3puCnHWtoatgklV3aCCslEbM7hU/Iu92+LpLO8ygcrMMsJxT3E2ApELdrTPy2eTQ== JenkinsMaster
+    volumes:  
+      - /var/run/docker.sock:/var/run/docker.sock
+      - $PWD/shared:/var/jenkins_home/workspace/shared_tags
+
+    # - /usr/local/bin/docker:/usr/local/bin/docker
+    # environment:
+    #   - DOCKER_HOST=unix:///var/run/docker.sock
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
