@@ -1,0 +1,120 @@
+pipeline {
+    agent {
+        label "DeployServer"
+    }
+    
+    parameters {
+        choice(
+            name: 'DEPLOY_ENV',
+            choices: ['Development', 'Staging', 'Production'],
+            description: '選擇部署環境'
+        )
+        activeChoice(
+            name: 'IMAGE_TAG',
+            script: '''
+                def tagsFile = new File('/var/jenkins_home/workspace/shared_tags/available_tags.txt')
+                if (tagsFile.exists()) {
+                    return tagsFile.readLines()
+                }
+                return ['latest']
+            ''',
+            description: '選擇要部署的映像版本'
+        )
+    }
+    
+    environment {
+        HARBOR_REGISTRY = 'reg.nadisystem.com'
+        HARBOR_CREDENTIALS = credentials('SammyHarborLogin')
+        DOCKER_IMAGE = "reg.nadisystem.com/p220202/data_adapter"
+        SHARED_DATA_DIR = '/var/jenkins_home/workspace/share_tags'
+    }
+    
+    stages {
+        stage('環境準備') {
+            steps {
+                echo "部署環境: ${params.DEPLOY_ENV}"
+                echo "Docker Image: ${DOCKER_IMAGE}"
+                echo "映像版本: ${params.IMAGE_TAG}"
+            }
+        }
+        
+        stage('登入 Harbor') {
+            steps {
+                withEnv([
+                    "REGISTRY=${HARBOR_REGISTRY}",
+                    "DOCKER_USER=${HARBOR_CREDENTIALS_USR}",
+                    "DOCKER_PASS=${HARBOR_CREDENTIALS_PSW}"
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login "$REGISTRY" \
+                            -u "$DOCKER_USER" --password-stdin
+                    '''
+                }
+            }
+        }
+        
+        stage('拉取鏡像') {
+            steps {
+                script {
+                    def fullImagePath = "${DOCKER_IMAGE}:${params.IMAGE_TAG}"
+                    sh "docker pull ${fullImagePath}"
+                    echo "成功拉取鏡像: ${fullImagePath}"
+                }
+            }
+        }
+        
+        stage('部署確認') {
+            steps {
+                input message: "確認要部署到 ${params.DEPLOY_ENV} 環境嗎？"
+            }
+        }
+        
+        stage('部署應用') {
+            steps {
+                script {
+                    def fullImagePath = "${DOCKER_IMAGE}:${params.IMAGE_TAG}"
+                    def containerName = "data_adapter_${params.DEPLOY_ENV.toLowerCase()}"
+                    
+                    // 根據環境設置參數
+                    def envSpecificParams = ""
+                    switch(params.DEPLOY_ENV) {
+                        case 'Development':
+                            envSpecificParams = "-e DEBUG=true"
+                            break
+                        case 'Staging':
+                            envSpecificParams = "-e STAGING=true"
+                            break
+                        case 'Production':
+                            envSpecificParams = "-e PRODUCTION=true"
+                            break
+                    }
+                    
+                    // 部署容器
+                    sh """
+                        docker stop ${containerName} || true
+                        docker rm ${containerName} || true
+                        docker run -d \
+                            --name ${containerName} \
+                            ${envSpecificParams} \
+                            --restart unless-stopped \
+                            ${fullImagePath}
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            sh "docker logout ${HARBOR_REGISTRY}"
+        }
+        success {
+            echo "部署成功完成！"
+            echo "環境: ${params.DEPLOY_ENV}"
+            echo "映像版本: ${params.IMAGE_TAG}"
+        }
+        failure {
+            echo "部署失敗！請檢查錯誤日誌"
+        }
+    }
+}

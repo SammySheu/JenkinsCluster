@@ -1,0 +1,165 @@
+pipeline {
+    agent {
+        label "DeployServer"
+    }
+    
+    environment {
+        GITLAB_CREDS = credentials('SammyGitLabLogin')
+        HARBOR_CREDENTIALS = credentials('SammyHarborLogin')
+        DOCKER_IMAGE = "reg.nadisystem.com/p220202/data_adapter"
+        HARBOR_REGISTRY = 'reg.nadisystem.com'
+        PROJECT_NAME = "p220202"
+        IMAGE_NAME = "data_adapter"
+        // 定義共享目錄位置
+        SHARED_DATA_DIR = '/var/jenkins_home/workspace/shared_tags'
+    }
+    
+    stages {
+        stage('Git Checkout') {
+            steps {
+                script {
+                    checkout([$class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            credentialsId: "SammyGitLabLogin",
+                            url: 'https://gitlab.com/nadi.ocms/group.server/p220202_environmental_control_data_collector.git'
+                        ]]
+                    ])
+                }
+            }
+        }
+        
+        stage('準備版本資訊') {
+            steps {
+                script {
+                    // 確保共享目錄存在
+                    sh "mkdir -p ${SHARED_DATA_DIR}"
+                    
+                    // 獲取 git commit SHA (短版本)
+                    env.GIT_COMMIT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    
+                    // 從 version.py 讀取版本號
+                    env.VERSION = sh(script: '''
+                        cat version.py | grep version | cut -d '"' -f 2
+                    ''', returnStdout: true).trim()
+                    
+                    // 使用 Jenkins BUILD_NUMBER
+                    env.BUILD_NUMBER = currentBuild.number
+                    
+                    // 組合完整的 tag
+                    env.IMAGE_TAG = "${env.VERSION}-${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHA}"
+                    
+                    echo "Version: ${env.VERSION}"
+                    echo "Build Number: ${env.BUILD_NUMBER}"
+                    echo "Git Commit: ${env.GIT_COMMIT_SHA}"
+                    echo "Final Image Tag: ${env.IMAGE_TAG}"
+                }
+            }
+        }
+        
+        stage('建置 Docker 映像') {
+            steps {
+                script {
+                    sh """
+                        docker build -t ${DOCKER_IMAGE}:${env.IMAGE_TAG} .
+                        docker tag ${DOCKER_IMAGE}:${env.IMAGE_TAG} ${DOCKER_IMAGE}:latest
+                    """
+                }
+            }
+        }
+        
+        stage('推送到 Harbor') {
+            steps {
+                script {
+                    withEnv([
+                        "REGISTRY=${HARBOR_REGISTRY}",
+                        "DOCKER_USER=${HARBOR_CREDENTIALS_USR}",
+                        "DOCKER_PASS=${HARBOR_CREDENTIALS_PSW}"
+                    ]) {
+                        sh '''
+                            echo "$DOCKER_PASS" | docker login "$REGISTRY" \
+                                -u "$DOCKER_USER" --password-stdin
+                        '''
+                    }
+                    
+                    sh """
+                        docker push ${DOCKER_IMAGE}:${env.IMAGE_TAG}
+                        docker push ${DOCKER_IMAGE}:latest
+                    """
+                }
+            }
+        }
+        
+        stage('取得並更新 Image Tags') {
+            steps {
+                script {
+                    def tags = []
+                    try {
+                        def harborApiUrl = "https://${HARBOR_REGISTRY}/api/v2.0/projects/${PROJECT_NAME}/repositories/${IMAGE_NAME}/artifacts"
+                        
+                        withEnv([
+                            "HARBOR_API_URL=${harborApiUrl}",
+                            "HARBOR_USER=${HARBOR_CREDENTIALS_USR}",
+                            "HARBOR_PASS=${HARBOR_CREDENTIALS_PSW}"
+                        ]) {
+                            def response = sh(
+                                script: '''
+                                    curl -k -s -X GET \\
+                                        -u "$HARBOR_USER:$HARBOR_PASS" \\
+                                        "$HARBOR_API_URL" \\
+                                        -H "accept: application/json"
+                                ''',
+                                returnStdout: true
+                            ).trim()
+                            
+                            def artifacts = new groovy.json.JsonSlurper().parseText(response)
+                            artifacts.each { artifact ->
+                                if (artifact.tags) {
+                                    artifact.tags.each { tag ->
+                                        tags.add(tag.name)
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // 將 tags 寫入檔案
+                        writeFile file: "${SHARED_DATA_DIR}/available_tags.txt", text: tags.join('\n')
+                        
+                        // 寫入更詳細的映像資訊
+                        def imageInfo = [
+                            last_build: [
+                                tag: env.IMAGE_TAG,
+                                timestamp: new Date().format("yyyy-MM-dd HH:mm:ss"),
+                                build_number: env.BUILD_NUMBER,
+                                git_commit: env.GIT_COMMIT_SHA,
+                                version: env.VERSION
+                            ],
+                            available_tags: tags
+                        ]
+                        
+                        writeFile file: "${SHARED_DATA_DIR}/image_info.json", 
+                                 text: groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(imageInfo))
+                        
+                        echo "找到的 tags: ${tags.join(', ')}"
+                    } catch (Exception e) {
+                        echo "獲取 tags 時發生錯誤: ${e.getMessage()}"
+                        error "無法獲取 image tags: ${e.getMessage()}"
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            sh "docker logout ${HARBOR_REGISTRY}"
+            cleanWs()
+        }
+        success {
+            echo "建置成功完成！Image tag: ${env.IMAGE_TAG}"
+        }
+        failure {
+            echo "建置失敗！請檢查錯誤日誌"
+        }
+    }
+}
